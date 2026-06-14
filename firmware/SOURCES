@@ -303,6 +303,9 @@ common/crc32-rkw.c
 common/dir.c
 common/disk_cache.c
 common/fat.c
+#ifdef HAVE_HFSPLUS
+common/hfsplus.c
+#endif
 common/file.c
 common/file_internal.c
 common/disk.c

@@ -180,14 +180,13 @@ int uncached_readdir_internal(struct filestr_base *stream,
                               struct file_base_info *infop,
                               struct fat_direntry *fatent)
 {
-    return fat_readdir(&stream->fatstr, &infop->fatfile.e,
-                       filestr_get_cache(stream), fatent);
+    return fs_readdir_info(stream, infop, fatent);
 }
 
 /* rewind the FS directory to the beginning */
 void uncached_rewinddir_internal(struct file_base_info *infop)
 {
-    fat_rewinddir(&infop->fatfile.e);
+    fs_rewinddir_info(infop);
 }
 
 /* check if the directory is empty (ie. only "." and/or ".." entries
@@ -197,7 +196,7 @@ int test_dir_empty_internal(struct filestr_base *stream)
     int rc;
 
     struct file_base_info info;
-    fat_rewind(&stream->fatstr);
+    fs_rewind(stream);
     rewinddir_internal(&info);
 
     while ((rc = readdir_internal(stream, &info, &dir_fatent)) > 0)
@@ -264,10 +263,9 @@ int uncached_readdir_dirent(struct filestr_base *stream,
                             struct DIRENT *entry)
 {
     struct fat_direntry fatent;
-    int rc = fat_readdir(&stream->fatstr, &scanp->fatscan,
-                         filestr_get_cache(stream), &fatent);
+    int rc = fs_readdir_scan(stream, scanp, &fatent);
 
-    /* FAT driver clears the struct fat_dirent if nothing is returned */
+    /* driver clears the struct fat_dirent if nothing is returned */
     strcpy(entry->d_name, fatent.name);
     entry->info.attr    = fatent.attr;
     entry->info.size    = fatent.filesize;
@@ -280,7 +278,7 @@ int uncached_readdir_dirent(struct filestr_base *stream,
 /* rewind the FS directory pointer */
 void uncached_rewinddir_dirent(struct dirscan_info *scanp)
 {
-    fat_rewinddir(&scanp->fatscan);
+    fs_rewinddir_scan(scanp);
 }
 
 
@@ -421,8 +419,7 @@ static void walk_check_prefix(struct pathwalk *walkp,
     if (compp->attr & ATTR_PREFIX)
         return;
 
-    if (!fat_file_is_same(&compp->info.fatfile,
-                          &walkp->compinfo->prefixp->fatfile))
+    if (!fs_file_is_same(&compp->info, walkp->compinfo->prefixp))
         return;
 
     compp->attr |= ATTR_PREFIX;
@@ -450,7 +447,7 @@ static NO_INLINE int open_path_component(struct pathwalk *walkp,
     /* scan parent for name; stream is converted to this parent */
     file_cache_reset(stream->cachep);
     stream->infop = &parentp->info;
-    fat_filestr_init(&stream->fatstr, &parentp->info.fatfile);
+    fs_filestr_init(stream, &parentp->info);
     rewinddir_internal(&compp->info);
 
     while ((rc = readdir_internal(stream, &compp->info, &dir_fatent)) > 0)
@@ -473,8 +470,7 @@ static NO_INLINE int open_path_component(struct pathwalk *walkp,
         return -EIO;
     }
 
-    rc = fat_open(stream->fatstr.fatfilep, dir_fatent.firstcluster,
-                  &compp->info.fatfile);
+    rc = fs_open(stream, dir_fatent.firstcluster, &compp->info);
     if (rc < 0)
     {
         DEBUGF("I/O error opening file/directory %s (%d)\n",
@@ -645,7 +641,7 @@ int close_stream_internal(struct filestr_base *stream)
     if ((foflags & (FO_SINGLE|FO_REMOVED)) == (FO_SINGLE|FO_REMOVED))
     {
         /* nothing is referencing it so now remove the file's data */
-        rc = fat_remove(&stream->infop->fatfile, FAT_RM_DATA);
+        rc = fs_remove(stream->infop, FAT_RM_DATA);
         if (rc < 0)
         {
             DEBUGF("I/O error removing file data: %d\n", rc);
@@ -673,8 +669,8 @@ int create_stream_internal(struct file_base_info *parentinfop,
     DEBUGF("Creating \"%s\"\n", name);
 
     struct file_base_info info;
-    int rc = fat_create_file(&parentinfop->fatfile, name, attr,
-                             &info.fatfile, get_dir_fatent_dircache());
+    int rc = fs_create_file(parentinfop, name, attr,
+                            &info, get_dir_fatent_dircache());
     if (rc < 0)
     {
         DEBUGF("Create failed: %d\n", rc);
@@ -721,7 +717,7 @@ int remove_stream_internal(const char *path, struct filestr_base *stream,
 
     /* save old info since fat_remove() will destroy the dir info */
     struct file_base_info oldinfo = *stream->infop;
-    rc = fat_remove(&stream->infop->fatfile, FAT_RM_DIRENTRIES);
+    rc = fs_remove(stream->infop, FAT_RM_DIRENTRIES);
     if (rc < 0)
     {
         DEBUGF("I/O error removing dir entries: %d\n", rc);

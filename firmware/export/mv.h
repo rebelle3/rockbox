@@ -123,6 +123,24 @@ struct volumeinfo
     int partition;  /* partition number (0 for superfloppy drives) */
 };
 
+/* Filesystem type mounted on a volume. Used by the fs_* dispatch wrappers in
+   file_internal.h to route VFS operations to the correct driver. */
+enum fs_type
+{
+    FS_FAT = 0,
+#ifdef HAVE_HFSPLUS
+    FS_HFSPLUS,
+#endif
+};
+
+#ifdef HAVE_HFSPLUS
+/* returns the FS_* type of a mounted volume (implemented in disk.c) */
+int volume_get_fstype(IF_MV_NONVOID(int volume));
+#else
+/* single filesystem (FAT): the compiler folds the dispatch switch away */
+#define volume_get_fstype(...) FS_FAT
+#endif
+
 /* Volume-centric functions (in disk.c) */
 void volume_recalc_free(IF_MV_NONVOID(int volume));
 unsigned int volume_get_cluster_size(IF_MV_NONVOID(int volume));

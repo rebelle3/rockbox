@@ -132,7 +132,7 @@ static bool binding_assign(const struct file_base_info *srcinfop,
         if (fobp->flags & FO_REMOVED)
             continue;
 
-        if (fat_file_is_same(&srcinfop->fatfile, &fobp->bind.info.fatfile))
+        if (fs_file_is_same(srcinfop, &fobp->bind.info))
         {
             /* already has open streams/mounts*/
             *fobpp = fobp;

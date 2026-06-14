@@ -121,15 +121,15 @@ static int flush_cache(struct filestr_desc *file)
 
     DEBUGF("Flushing dirty sector cache (%llu)\n", (uint64_t)cachep->sector);
 
-    if (fat_query_sectornum(&file->stream.fatstr) != cachep->sector)
+    if (fs_query_sectornum(&file->stream) != cachep->sector)
     {
         /* get on the correct sector */
-        rc = fat_seek(&file->stream.fatstr, cachep->sector);
+        rc = fs_seek(&file->stream, cachep->sector);
         if (rc < 0)
             FILE_ERROR(EIO, rc * 10 - 1);
     }
 
-    rc = fat_readwrite(&file->stream.fatstr, 1, cachep->buffer, true);
+    rc = fs_readwrite(&file->stream, 1, cachep->buffer, true);
     if (rc < 0)
     {
         if (rc == FAT_RC_ENOSPC)
@@ -198,7 +198,7 @@ file_error:
 /* Handle syncing all file's streams to the truncation */
 static void handle_truncate(struct filestr_desc * const file, file_size_t size)
 {
-    uint16_t sector_size = fat_file_sector_size(IF_MV(file->stream.fatstr.fatfilep));
+    uint16_t sector_size = fs_file_sector_size(&file->stream);
     unsigned long filesectors = filesize_sectors(sector_size, size);
 
     struct filestr_base *s = NULL;
@@ -210,8 +210,8 @@ static void handle_truncate(struct filestr_desc * const file, file_size_t size)
             filestr_discard_cache(s);
 
         /* files outside bounds must be rewound */
-        if (fat_query_sectornum(&s->fatstr) > filesectors)
-            fat_seek_to_stream(&s->fatstr, &file->stream.fatstr);
+        if (fs_query_sectornum(s) > filesectors)
+            fs_seek_to_stream(s, &file->stream);
 
         /* clip file offset too if needed */
         struct filestr_desc *f = (struct filestr_desc *)s;
@@ -229,7 +229,7 @@ static int ftruncate_internal(struct filestr_desc *file, file_size_t size,
     file_size_t cursize = *file->sizep;
     file_size_t truncsize = MIN(size, cursize);
 
-    uint16_t sector_size = fat_file_sector_size(IF_MV(file->stream.fatstr.fatfilep));
+    uint16_t sector_size = fs_file_sector_size(&file->stream);
 
     if (write_now)
     {
@@ -254,11 +254,11 @@ static int ftruncate_internal(struct filestr_desc *file, file_size_t size,
                 FILE_ERROR(ERRNO, rc2 * 10 - 1);
         }
 
-        rc2 = fat_seek(&file->stream.fatstr, sector);
+        rc2 = fs_seek(&file->stream, sector);
         if (rc2 < 0)
             FILE_ERROR(EIO, rc2 * 10 - 2);
 
-        rc2 = fat_truncate(&file->stream.fatstr);
+        rc2 = fs_truncate(&file->stream);
         if (rc2 < 0)
             FILE_ERROR(EIO, rc2 * 10 - 3);
 
@@ -294,7 +294,7 @@ static int fsync_internal(struct filestr_desc *file)
 
     file_size_t size = *file->sizep;
     unsigned int foflags = fileobj_get_flags(&file->stream);
-    uint16_t sector_size = fat_file_sector_size(IF_MV(file->stream.fatstr.fatfilep));
+    uint16_t sector_size = fs_file_sector_size(&file->stream);
 
     /* flush sector cache? */
     struct filestr_cache *const cachep = file->stream.cachep;
@@ -323,8 +323,8 @@ static int fsync_internal(struct filestr_desc *file)
 
 file_error:;
     /* tie up all loose ends (try to close the file even if failing) */
-    int rc2 = fat_closewrite(&file->stream.fatstr, size,
-                             get_dir_fatent_dircache());
+    int rc2 = fs_closewrite(&file->stream, size,
+                            get_dir_fatent_dircache());
     if (rc2 >= 0)
         fileop_onsync_internal(&file->stream); /* dir_fatent is implicit arg */
 
@@ -424,7 +424,7 @@ static int open_internal_inner2(const char *path,
         FILE_ERROR(ENOENT, -7);
     }
 
-    fat_rewind(&file->stream.fatstr);
+    fs_rewind(&file->stream);
     file->sizep = fileobj_get_sizep(&file->stream);
     file->offset = 0;
 
@@ -536,10 +536,10 @@ static int readwrite_fill_cache(struct filestr_desc *file, unsigned long sector,
             FILE_ERROR(ERRNO, rc * 10 - 1);
     }
 
-    if (fat_query_sectornum(&file->stream.fatstr) != sector)
+    if (fs_query_sectornum(&file->stream) != sector)
     {
         /* get on the correct sector */
-        rc = fat_seek(&file->stream.fatstr, sector);
+        rc = fs_seek(&file->stream, sector);
         if (rc < 0)
             FILE_ERROR(EIO, rc * 10 - 2);
     }
@@ -548,7 +548,7 @@ static int readwrite_fill_cache(struct filestr_desc *file, unsigned long sector,
     {
         /* only reading or this sector would have been flushed if the cache
            was previously needed for a different sector */
-        rc = fat_readwrite(&file->stream.fatstr, 1, cachep->buffer, false);
+        rc = fs_readwrite(&file->stream, 1, cachep->buffer, false);
         if (rc < 0)
             FILE_ERROR(rc == FAT_RC_ENOSPC ? ENOSPC : EIO, rc * 10 - 3);
     }
@@ -652,7 +652,7 @@ static ssize_t readwrite(struct filestr_desc *file, void *buf, size_t nbyte,
 
     struct filestr_cache * const cachep = file->stream.cachep;
     void * const bufstart = buf;
-    uint16_t sector_size = fat_file_sector_size(IF_MV(file->stream.fatstr.fatfilep));
+    uint16_t sector_size = fs_file_sector_size(&file->stream);
 
     const unsigned long filesectors = filesize_sectors(sector_size, size);
     unsigned long sector = file->offset / sector_size;
@@ -697,7 +697,7 @@ static ssize_t readwrite(struct filestr_desc *file, void *buf, size_t nbyte,
 
         if (runlen)
         {
-            if (fat_query_sectornum(&file->stream.fatstr) != sector)
+            if (fs_query_sectornum(&file->stream) != sector)
             {
                 /* get on the correct sector */
                 rc = 0;
@@ -716,13 +716,13 @@ static ssize_t readwrite(struct filestr_desc *file, void *buf, size_t nbyte,
 
                 if (rc == 0)
                 {
-                    rc = fat_seek(&file->stream.fatstr, sector);
+                    rc = fs_seek(&file->stream, sector);
                     if (rc < 0)
                         FILE_ERROR(EIO, rc * 10 - 5);
                 }
             }
 
-            rc = fat_readwrite(&file->stream.fatstr, runlen, buf, write);
+            rc = fs_readwrite(&file->stream, runlen, buf, write);
             if (rc < 0)
             {
                 DEBUGF("I/O error %sing %ld sectors\n",
@@ -1051,8 +1051,8 @@ int rename(const char *old, const char *new)
 #endif /* HAVE_MULTIVOLUME */
 
     /* if the parent is changing then this is a move, not a simple rename */
-    const bool is_move = !fat_file_is_same(&oldinfo.parentinfo.fatfile,
-                                           &newinfo.parentinfo.fatfile);
+    const bool is_move = !fs_file_is_same(&oldinfo.parentinfo,
+                                          &newinfo.parentinfo);
     /* prefix found and moving? */
     if (is_move && (newinfo.attr & ATTR_PREFIX))
     {
@@ -1099,8 +1099,7 @@ int rename(const char *old, const char *new)
        victim's data has no reference in the directory tree, that is, until
        everything else first succeeds */
     struct file_base_info old_fileinfo = *oldstr.infop;
-    rc = fat_rename(&newinfo.parentinfo.fatfile, &oldstr.infop->fatfile,
-                    newname);
+    rc = fs_rename(&newinfo.parentinfo, oldstr.infop, newname);
     if (rc < 0)
     {
         DEBUGF("I/O error renaming file: %d\n", rc);
@@ -1165,8 +1164,7 @@ int modtime(const char *path, time_t modtime)
             FILE_ERROR(ERRNO, open1rc * 10 - 1);
     }
 
-    rc = fat_modtime(&pathinfo.parentinfo.fatfile, pathstr.fatstr.fatfilep,
-                     modtime);
+    rc = fs_modtime(&pathinfo.parentinfo, &pathstr, modtime);
     if (rc < 0)
     {
         DEBUGF("I/O error during modtime: %d\n", rc);

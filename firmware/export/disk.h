@@ -35,6 +35,10 @@ struct partinfo
 #define PARTITION_TYPE_FAT16                0x06
 #define PARTITION_TYPE_OS2_HIDDEN_C_DRIVE   0x84
 #define PARTITION_TYPE_GPT_GUARD            0xee
+/* Internal tag for an Apple_HFS partition discovered via an Apple Partition
+   Map (APM has no single-byte partition type; this value is never written to
+   disk and is only used to select the HFS+ driver at mount time). */
+#define PARTITION_TYPE_HFSPLUS              0xaf
 
 #define MAX_PARTITIONS_PER_DRIVE 4  /* Needs to be at least 4 */
 

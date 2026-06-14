@@ -205,6 +205,12 @@
 /* define this if we want to support 512n and 4Kn drives */
 #define MAX_VARIABLE_LOG_SECTOR 4096
 
+/* Read-only support for Mac-formatted iPods (Apple Partition Map + HFS+).
+   This is an experimental, read-only filesystem; see firmware/common/hfsplus.c.
+   NOTE: while enabled, the directory cache is disabled (see config.h) because
+   it is currently FAT-specific. */
+#define HAVE_HFSPLUS
+
 #define HAVE_HARDWARE_CLICK
 
 /* Define this if you have adjustable CPU frequency */

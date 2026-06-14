@@ -963,7 +963,10 @@ Lyre prototype 1 */
  * plenty of RAM. Both features can be enabled independently. */
 #if (MEMORYSIZE >= 8) && !defined(BOOTLOADER) && (defined(CHECKWPS) || !defined(__PCTOOL__)) \
     && !defined(APPLICATION)
-#ifndef SIMULATOR
+/* The directory cache is currently FAT-specific; don't enable it on targets
+   that mount experimental read-only HFS+ volumes (it would scan an HFS+ volume
+   with the FAT driver). */
+#if !defined(SIMULATOR) && !defined(HAVE_HFSPLUS)
 #define HAVE_DIRCACHE
 #endif
 #ifdef HAVE_TAGCACHE

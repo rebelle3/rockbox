@@ -274,7 +274,7 @@ int ns_open_root(IF_MV(int volume,) unsigned int *callflagsp,
         if (!devpath && !state)
             return -ENOENT; /* regular open requires having been mounted */
 #if CONFIG_PLATFORM & PLATFORM_NATIVE
-        if (fat_open_rootdir(IF_MV(volume,) &infop->fatfile) < 0)
+        if (fs_open_rootdir(IF_MV(volume,) infop) < 0)
         {
             logf("%s: DevPath Vol:%d St:%d NOT mounted", __func__, item, state);
             return -ENOENT; /* not mounted */
@@ -366,7 +366,7 @@ int ns_open_stream(const char *path, unsigned int callflags,
     if (stream->flags & FDO_BUSY)
     {
         /* root contents are mounted */
-        fat_rewind(&stream->fatstr);
+        fs_rewind(stream);
     }
     else
     {

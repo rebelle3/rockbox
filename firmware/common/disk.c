@@ -29,6 +29,10 @@
 #include "rb_namespace.h"
 #include "disk.h"
 #include "panic.h"
+#ifdef HAVE_HFSPLUS
+#include "rbendian.h"
+#include "hfsplus.h"
+#endif
 
 #if defined(HAVE_BOOTDATA) && !defined(SIMULATOR) && !defined(BOOTLOADER)
 #include "bootdata.h"
@@ -80,6 +84,16 @@
 
 static struct partinfo part[NUM_DRIVES*MAX_PARTITIONS_PER_DRIVE];
 static struct volumeinfo volumes[NUM_VOLUMES];
+
+#ifdef HAVE_HFSPLUS
+/* filesystem type mounted on each volume (FS_FAT by default / zero-init) */
+static uint8_t volume_fstype[NUM_VOLUMES];
+
+int volume_get_fstype(IF_MV_NONVOID(int volume))
+{
+    return volume_fstype[IF_MV_VOL(volume)];
+}
+#endif
 
 /* check if the entry points to a free volume */
 static bool is_free_volume(const struct volumeinfo *vi)
@@ -369,6 +383,72 @@ reload:
 
         init = true;
     }
+#ifdef HAVE_HFSPLUS
+    else if (sector[0] == 0x45 && sector[1] == 0x52) /* 'ER' Driver Desc. */
+    {
+        /* Apple Partition Map (Mac-formatted iPod). Enumerate the map and
+           record any Apple_HFS data partition; the firmware (Apple_MDFW) and
+           map/free partitions are skipped. */
+        struct partinfo *pinfo = &part[IF_MD_DRV(drive)*MAX_PARTITIONS_PER_DRIVE];
+        uint32_t sbBlkSize = load_be16(sector + 2);
+        int log_ss = disk_get_log_sector_size(IF_MD(drive));
+        int part = 0;
+        uint32_t map_entries = 0;
+
+        if (sbBlkSize == 0)
+            sbBlkSize = 512;
+
+        disk_writer_lock();
+
+        for (int i = 0; i < MAX_PARTITIONS_PER_DRIVE; i++)
+        {
+            pinfo[i].type = 0;
+            pinfo[i].start = 0;
+            pinfo[i].size = 0;
+        }
+
+        for (uint32_t m = 0; m < 64; m++)
+        {
+            uint64_t byteoff = (uint64_t)(1 + m) * sbBlkSize;
+            sector_t sec = byteoff / log_ss;
+            uint32_t off = byteoff % log_ss;
+
+            storage_read_sectors(IF_MD(drive,) sec, 1, sector);
+            unsigned char *e = sector + off;
+
+            if (load_be16(e) != 0x504D) /* 'PM' */
+                break;
+
+            if (m == 0)
+                map_entries = load_be32(e + 4); /* pmMapBlkCnt */
+
+            uint32_t pstart = load_be32(e + 8);  /* pmPyPartStart (blocks) */
+            uint32_t pcount = load_be32(e + 12); /* pmPartBlkCnt   (blocks) */
+            const char *ptype = (const char *)(e + 48);
+
+            DEBUGF("APM%lu: %s start=%lu count=%lu\n", (unsigned long)m,
+                   ptype, (unsigned long)pstart, (unsigned long)pcount);
+
+            if (!strcmp(ptype, "Apple_HFS") && part < MAX_PARTITIONS_PER_DRIVE)
+            {
+                pinfo[part].start = (sector_t)pstart * sbBlkSize / log_ss;
+                pinfo[part].size  = (sector_t)pcount * sbBlkSize / log_ss;
+                pinfo[part].type  = PARTITION_TYPE_HFSPLUS;
+                part++;
+            }
+
+            if (map_entries && (m + 1) >= map_entries)
+                break;
+        }
+
+        disk_writer_unlock();
+
+        if (part > 0)
+            init = true;
+        else
+            DEBUGF("APM: no Apple_HFS partition found\n");
+    }
+#endif /* HAVE_HFSPLUS */
     else
     {
         DEBUGF("Bad boot sector signature\n");
@@ -425,6 +505,9 @@ int disk_mount(int drive)
 #endif
         mounted = 1;
         init_volume(&volumes[volume], drive, 0);
+#ifdef HAVE_HFSPLUS
+        volume_fstype[volume] = FS_FAT;
+#endif
         volume_onmount_internal(IF_MV(volume));
 
         struct storage_info info;
@@ -448,6 +531,21 @@ int disk_mount(int drive)
 
             DEBUGF("Trying to mount partition %d.\n", i);
 
+#ifdef HAVE_HFSPLUS
+            if (pinfo[i].type == PARTITION_TYPE_HFSPLUS)
+            {
+                if (!hfs_mount(IF_MV(volume,) IF_MD(drive,) pinfo[i].start))
+                {
+                    mounted++;
+                    init_volume(&volumes[volume], drive, i);
+                    volume_fstype[volume] = FS_HFSPLUS;
+                    volume_onmount_internal(IF_MV(volume));
+                    volume = get_free_volume(); /* prepare next entry */
+                }
+                continue;
+            }
+#endif /* HAVE_HFSPLUS */
+
 #ifdef MAX_VIRT_SECTOR_SIZE
             for (int j = 1; j <= (MAX_VIRT_SECTOR_SIZE/LOG_SECTOR_SIZE(drive)); j <<= 1)
             {
@@ -457,6 +555,9 @@ int disk_mount(int drive)
                     pinfo[i].size *= j;
                     mounted++;
                     init_volume(&volumes[volume], drive, i);
+#ifdef HAVE_HFSPLUS
+                    volume_fstype[volume] = FS_FAT;
+#endif
                     disk_sector_multiplier[drive] = j;
                     volume_onmount_internal(IF_MV(volume));
                     volume = get_free_volume(); /* prepare next entry */
@@ -472,6 +573,9 @@ int disk_mount(int drive)
             {
                 mounted++;
                 init_volume(&volumes[volume], drive, i);
+#ifdef HAVE_HFSPLUS
+                volume_fstype[volume] = FS_FAT;
+#endif
                 volume_onmount_internal(IF_MV(volume));
                 volume = get_free_volume(); /* prepare next entry */
                 if (pinfo[i].type == 0) {
@@ -501,6 +605,11 @@ int disk_mount_all(void)
     /* reset all mounted partitions */
     volume_onunmount_internal(IF_MV(-1));
     fat_init();
+#ifdef HAVE_HFSPLUS
+    hfs_init();
+    for (int i = 0; i < NUM_VOLUMES; i++)
+        volume_fstype[i] = FS_FAT;
+#endif
 
     /* mark all volumes as free */
     for (int i = 0; i < NUM_VOLUMES; i++)
@@ -533,7 +642,15 @@ int disk_unmount(int drive)
         {
             mark_free_volume(vi); /* FIXME: should do this after unmount? */
             volume_onunmount_internal(IF_MV(i));
+#ifdef HAVE_HFSPLUS
+            if (volume_fstype[i] == FS_HFSPLUS)
+                hfs_unmount(IF_MV(i));
+            else
+                fat_unmount(IF_MV(i));
+            volume_fstype[i] = FS_FAT;
+#else
             fat_unmount(IF_MV(i));
+#endif
             unmounted++;
         }
     }
@@ -585,6 +702,11 @@ void volume_recalc_free(IF_MV_NONVOID(int volume))
     if (!CHECK_VOL(volume))
         return;
 
+#ifdef HAVE_HFSPLUS
+    if (volume_fstype[IF_MV_VOL(volume)] == FS_HFSPLUS)
+        return; /* read-only: free count not tracked */
+#endif
+
     /* FIXME: this is crummy but the only way to ensure a correct freecount
        if other threads are writing and changing the fsinfo; it is possible
        to get multiple threads calling here and also writing and get correct
@@ -600,6 +722,11 @@ unsigned int volume_get_cluster_size(IF_MV_NONVOID(int volume))
     if (!CHECK_VOL(volume))
         return 0;
 
+#ifdef HAVE_HFSPLUS
+    if (volume_fstype[IF_MV_VOL(volume)] == FS_HFSPLUS)
+        return 65536; /* read hint only; HFS+ allocation block is small */
+#endif
+
     disk_reader_lock();
     unsigned int clustersize = fat_get_cluster_size(IF_MV(volume));
     disk_reader_unlock();
@@ -609,6 +736,19 @@ unsigned int volume_get_cluster_size(IF_MV_NONVOID(int volume))
 void volume_size(IF_MV(int volume,) sector_t *sizep, sector_t *freep)
 {
     disk_reader_lock();
+
+#ifdef HAVE_HFSPLUS
+    if (CHECK_VOL(volume) && volume_fstype[IF_MV_VOL(volume)] == FS_HFSPLUS)
+    {
+        if (!hfs_size(IF_MV(volume,) sizep, freep))
+        {
+            if (sizep) *sizep = 0;
+            if (freep) *freep = 0;
+        }
+        disk_reader_unlock();
+        return;
+    }
+#endif
 
     if (!CHECK_VOL(volume) || !fat_size(IF_MV(volume,) sizep, freep))
     {

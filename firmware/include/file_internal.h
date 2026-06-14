@@ -29,6 +29,9 @@
 #include "fs_attr.h"
 #include "fs_defines.h"
 #include "fat.h"
+#ifdef HAVE_HFSPLUS
+#include "hfsplus.h"
+#endif
 #include "dir.h"
 #ifdef HAVE_DIRCACHE
 #include "dircache.h"
@@ -115,6 +118,9 @@ struct file_base_info
 #if CONFIG_PLATFORM & PLATFORM_NATIVE
     struct fat_file      fatfile; /* FS driver file info */
 #endif
+#ifdef HAVE_HFSPLUS
+    struct hfs_file      hfsfile; /* HFS+ driver file info (volume/e overlap) */
+#endif
     };
 #ifdef HAVE_DIRCACHE
     struct dircache_file dcfile;  /* dircache file info */
@@ -137,9 +143,14 @@ struct file_base_binding
 /* directory scanning position info */
 struct dirscan_info
 {
+    union {
 #if CONFIG_PLATFORM & PLATFORM_NATIVE
     struct fat_dirscan_info fatscan; /* FS driver scan info */
 #endif
+#ifdef HAVE_HFSPLUS
+    struct hfs_dirscan_info hfsscan; /* HFS+ scan info (overlaps fatscan) */
+#endif
+    };
 #ifdef HAVE_DIRCACHE
     struct dircache_file    dcscan;  /* dircache scan info */
 #endif
@@ -153,7 +164,12 @@ struct filestr_base
     struct filestr_cache     cache;   /* stream-local cache */
     struct filestr_cache     *cachep; /* the cache in use (local or shared) */
     struct file_base_info    *infop;  /* base file information */
+    union {
     struct fat_filestr       fatstr;  /* FS driver information */
+#ifdef HAVE_HFSPLUS
+    struct hfs_filestr       hfsstr;  /* HFS+ driver stream information */
+#endif
+    };
     struct file_base_binding *bindp;  /* common binding for file/dir */
     struct mutex             *mtx;    /* serialization for this stream */
 };
@@ -343,5 +359,237 @@ void fill_dirinfo_native(struct dirinfo_native *din);
 #endif /* HAVE_DIRCACHE */
 
 void filesystem_init(void) INIT_ATTR;
+
+/** Filesystem dispatch wrappers **/
+/* These take the filesystem-agnostic base structures and route each VFS
+   operation to the FAT or HFS+ driver depending on the volume's filesystem
+   type. When HFS+ support is not compiled in, every wrapper folds to a direct
+   FAT call with no overhead and no behavioural change. */
+
+#ifndef HAVE_HFSPLUS
+
+/* FAT-only build: thin pass-throughs */
+static inline int fs_open_rootdir(IF_MV(int volume,) struct file_base_info *infop)
+    { return fat_open_rootdir(IF_MV(volume,) &infop->fatfile); }
+static inline int fs_open(struct filestr_base *parent, long id,
+                          struct file_base_info *infop)
+    { return fat_open(parent->fatstr.fatfilep, id, &infop->fatfile); }
+static inline void fs_filestr_init(struct filestr_base *stream,
+                                   struct file_base_info *infop)
+    { fat_filestr_init(&stream->fatstr, &infop->fatfile); }
+static inline void fs_rewind(struct filestr_base *stream)
+    { fat_rewind(&stream->fatstr); }
+static inline int fs_readdir_info(struct filestr_base *stream,
+                                  struct file_base_info *infop,
+                                  struct fat_direntry *fatent)
+    { return fat_readdir(&stream->fatstr, &infop->fatfile.e,
+                         filestr_get_cache(stream), fatent); }
+static inline int fs_readdir_scan(struct filestr_base *stream,
+                                  struct dirscan_info *scanp,
+                                  struct fat_direntry *fatent)
+    { return fat_readdir(&stream->fatstr, &scanp->fatscan,
+                         filestr_get_cache(stream), fatent); }
+static inline void fs_rewinddir_info(struct file_base_info *infop)
+    { fat_rewinddir(&infop->fatfile.e); }
+static inline void fs_rewinddir_scan(struct dirscan_info *scanp)
+    { fat_rewinddir(&scanp->fatscan); }
+static inline int fs_seek(struct filestr_base *stream, unsigned long sector)
+    { return fat_seek(&stream->fatstr, sector); }
+static inline sector_t fs_query_sectornum(struct filestr_base *stream)
+    { return fat_query_sectornum(&stream->fatstr); }
+static inline long fs_readwrite(struct filestr_base *stream,
+                                unsigned long sectorcount, void *buf, bool write)
+    { return fat_readwrite(&stream->fatstr, sectorcount, buf, write); }
+static inline bool fs_file_is_same(const struct file_base_info *a,
+                                   const struct file_base_info *b)
+    { return fat_file_is_same(&a->fatfile, &b->fatfile); }
+#if defined(MAX_VARIABLE_LOG_SECTOR)
+static inline int fs_file_sector_size(struct filestr_base *stream)
+    { return fat_file_sector_size(IF_MV(stream->fatstr.fatfilep)); }
+#else
+#define fs_file_sector_size(stream) SECTOR_SIZE
+#endif
+
+#else /* HAVE_HFSPLUS */
+
+/* derive the filesystem type from a base info / stream (the union always
+   exposes the volume number) */
+static inline int fs_type_of_info(const struct file_base_info *infop)
+    { return volume_get_fstype(IF_MV(infop->volume)); }
+static inline int fs_type_of_stream(const struct filestr_base *stream)
+    { return volume_get_fstype(IF_MV(stream->infop->volume)); }
+
+static inline int fs_open_rootdir(IF_MV(int volume,) struct file_base_info *infop)
+{
+    if (volume_get_fstype(IF_MV(volume)) == FS_HFSPLUS)
+        return hfs_open_rootdir(IF_MV(volume,) &infop->hfsfile);
+    return fat_open_rootdir(IF_MV(volume,) &infop->fatfile);
+}
+static inline int fs_open(struct filestr_base *parent, long id,
+                          struct file_base_info *infop)
+{
+    if (fs_type_of_stream(parent) == FS_HFSPLUS)
+        return hfs_open(parent->hfsstr.filep, id, &infop->hfsfile);
+    return fat_open(parent->fatstr.fatfilep, id, &infop->fatfile);
+}
+static inline void fs_filestr_init(struct filestr_base *stream,
+                                   struct file_base_info *infop)
+{
+    if (fs_type_of_info(infop) == FS_HFSPLUS)
+        hfs_filestr_init(&stream->hfsstr, &infop->hfsfile);
+    else
+        fat_filestr_init(&stream->fatstr, &infop->fatfile);
+}
+static inline void fs_rewind(struct filestr_base *stream)
+{
+    if (fs_type_of_stream(stream) == FS_HFSPLUS)
+        hfs_rewind(&stream->hfsstr);
+    else
+        fat_rewind(&stream->fatstr);
+}
+static inline int fs_readdir_info(struct filestr_base *stream,
+                                  struct file_base_info *infop,
+                                  struct fat_direntry *fatent)
+{
+    if (fs_type_of_stream(stream) == FS_HFSPLUS)
+        return hfs_readdir(&stream->hfsstr, &infop->hfsfile.e, fatent);
+    return fat_readdir(&stream->fatstr, &infop->fatfile.e,
+                       filestr_get_cache(stream), fatent);
+}
+static inline int fs_readdir_scan(struct filestr_base *stream,
+                                  struct dirscan_info *scanp,
+                                  struct fat_direntry *fatent)
+{
+    if (fs_type_of_stream(stream) == FS_HFSPLUS)
+        return hfs_readdir(&stream->hfsstr, &scanp->hfsscan, fatent);
+    return fat_readdir(&stream->fatstr, &scanp->fatscan,
+                       filestr_get_cache(stream), fatent);
+}
+/* rewinddir resets the scan cursor to the "not started" sentinel. The FAT and
+   HFS+ scan structures overlap (both are union members and the embedded copy
+   in the file info is laid out to coincide), and both drivers treat the same
+   reset state as "rewound", so no fs-type lookup is needed here. */
+static inline void fs_rewinddir_info(struct file_base_info *infop)
+    { fat_rewinddir(&infop->fatfile.e); }
+static inline void fs_rewinddir_scan(struct dirscan_info *scanp)
+    { fat_rewinddir(&scanp->fatscan); }
+static inline int fs_seek(struct filestr_base *stream, unsigned long sector)
+{
+    if (fs_type_of_stream(stream) == FS_HFSPLUS)
+        return hfs_seek(&stream->hfsstr, sector);
+    return fat_seek(&stream->fatstr, sector);
+}
+static inline sector_t fs_query_sectornum(struct filestr_base *stream)
+{
+    if (fs_type_of_stream(stream) == FS_HFSPLUS)
+        return hfs_query_sectornum(&stream->hfsstr);
+    return fat_query_sectornum(&stream->fatstr);
+}
+static inline long fs_readwrite(struct filestr_base *stream,
+                                unsigned long sectorcount, void *buf, bool write)
+{
+    if (fs_type_of_stream(stream) == FS_HFSPLUS)
+        return hfs_readwrite(&stream->hfsstr, sectorcount, buf, write);
+    return fat_readwrite(&stream->fatstr, sectorcount, buf, write);
+}
+static inline bool fs_file_is_same(const struct file_base_info *a,
+                                   const struct file_base_info *b)
+{
+    if (fs_type_of_info(a) == FS_HFSPLUS)
+        return hfs_file_is_same(&a->hfsfile, &b->hfsfile);
+    return fat_file_is_same(&a->fatfile, &b->fatfile);
+}
+#if defined(MAX_VARIABLE_LOG_SECTOR)
+static inline int fs_file_sector_size(struct filestr_base *stream)
+{
+    if (fs_type_of_stream(stream) == FS_HFSPLUS)
+        return hfs_file_sector_size(IF_MV(stream->hfsstr.filep));
+    return fat_file_sector_size(IF_MV(stream->fatstr.fatfilep));
+}
+#else
+#define fs_file_sector_size(stream) SECTOR_SIZE
+#endif
+
+#endif /* HAVE_HFSPLUS */
+
+/* write-path wrappers: HFS+ is read-only, so these fail cleanly instead of
+   ever letting the FAT writer touch an HFS+ volume. On FAT-only builds they
+   are direct pass-throughs. */
+#ifdef HAVE_HFSPLUS
+static inline int fs_truncate(struct filestr_base *stream)
+{
+    if (fs_type_of_stream(stream) == FS_HFSPLUS)
+        return HFS_RC_READONLY;
+    return fat_truncate(&stream->fatstr);
+}
+static inline int fs_closewrite(struct filestr_base *stream, uint32_t size,
+                                struct fat_direntry *fatentp)
+{
+    if (fs_type_of_stream(stream) == FS_HFSPLUS)
+        return 0; /* nothing was written; succeed quietly */
+    return fat_closewrite(&stream->fatstr, size, fatentp);
+}
+static inline void fs_seek_to_stream(struct filestr_base *stream,
+                                     const struct filestr_base *seekto)
+{
+    if (fs_type_of_stream(stream) != FS_HFSPLUS)
+        fat_seek_to_stream(&stream->fatstr, &seekto->fatstr);
+}
+static inline int fs_create_file(struct file_base_info *parentinfop,
+                                 const char *name, uint8_t attr,
+                                 struct file_base_info *infop,
+                                 struct fat_direntry *fatentp)
+{
+    if (fs_type_of_info(parentinfop) == FS_HFSPLUS)
+        return HFS_RC_READONLY;
+    return fat_create_file(&parentinfop->fatfile, name, attr,
+                           &infop->fatfile, fatentp);
+}
+static inline int fs_remove(struct file_base_info *infop, int what)
+{
+    if (fs_type_of_info(infop) == FS_HFSPLUS)
+        return HFS_RC_READONLY;
+    return fat_remove(&infop->fatfile, what);
+}
+static inline int fs_rename(struct file_base_info *parentinfop,
+                            struct file_base_info *fileinfop,
+                            const unsigned char *newname)
+{
+    if (fs_type_of_info(parentinfop) == FS_HFSPLUS)
+        return HFS_RC_READONLY;
+    return fat_rename(&parentinfop->fatfile, &fileinfop->fatfile, newname);
+}
+static inline int fs_modtime(struct file_base_info *parentinfop,
+                             struct filestr_base *stream, time_t modtime)
+{
+    if (fs_type_of_info(parentinfop) == FS_HFSPLUS)
+        return HFS_RC_READONLY;
+    return fat_modtime(&parentinfop->fatfile, stream->fatstr.fatfilep, modtime);
+}
+#else /* !HAVE_HFSPLUS */
+static inline int fs_truncate(struct filestr_base *stream)
+    { return fat_truncate(&stream->fatstr); }
+static inline int fs_closewrite(struct filestr_base *stream, uint32_t size,
+                                struct fat_direntry *fatentp)
+    { return fat_closewrite(&stream->fatstr, size, fatentp); }
+static inline void fs_seek_to_stream(struct filestr_base *stream,
+                                     const struct filestr_base *seekto)
+    { fat_seek_to_stream(&stream->fatstr, &seekto->fatstr); }
+static inline int fs_create_file(struct file_base_info *parentinfop,
+                                 const char *name, uint8_t attr,
+                                 struct file_base_info *infop,
+                                 struct fat_direntry *fatentp)
+    { return fat_create_file(&parentinfop->fatfile, name, attr,
+                             &infop->fatfile, fatentp); }
+static inline int fs_remove(struct file_base_info *infop, int what)
+    { return fat_remove(&infop->fatfile, what); }
+static inline int fs_rename(struct file_base_info *parentinfop,
+                            struct file_base_info *fileinfop,
+                            const unsigned char *newname)
+    { return fat_rename(&parentinfop->fatfile, &fileinfop->fatfile, newname); }
+static inline int fs_modtime(struct file_base_info *parentinfop,
+                             struct filestr_base *stream, time_t modtime)
+    { return fat_modtime(&parentinfop->fatfile, stream->fatstr.fatfilep, modtime); }
+#endif /* HAVE_HFSPLUS */
 
 #endif /* _FILE_INTERNAL_H_ */
