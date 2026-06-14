@@ -6,7 +6,8 @@
  *   Firmware   |____|_  /\____/ \___  >__|_ \|___  /\____/__/\_ \
  *                     \/            \/     \/    \/            \/
  *
- * Read-only Apple HFS+ (and HFSX) filesystem support for Mac-formatted iPods.
+ * Apple HFS+ (and HFSX) filesystem support for Mac-formatted iPods.
+ * Read-write on non-journaled volumes; journaled volumes are read-only.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -26,8 +27,11 @@
 #include "config.h"
 #include "mv.h"
 
-/* This driver is read-only. Any write entry point returns this. */
+/* returned by write entry points when the volume cannot be written (e.g. a
+   journaled volume, which this driver does not maintain a journal for) */
 #define HFS_RC_READONLY (-30)
+/* out of space */
+#define HFS_RC_ENOSPC   (-31)
 
 /* a single contiguous run of allocation blocks within a fork */
 struct hfs_extent
@@ -59,6 +63,7 @@ struct hfs_file
     struct hfs_dirscan_info e;  /* entry/scan information (aligns with fat) */
     /* HFS+ specific below this point */
     uint32_t cnid;              /* catalog node id of this file/dir */
+    uint32_t parent;            /* parent folder cnid (0 if unknown) */
     uint8_t  is_dir;            /* nonzero if a directory */
     uint64_t size;              /* data fork logical size in bytes */
     uint32_t total_blocks;      /* data fork size in allocation blocks */
@@ -98,6 +103,19 @@ struct fat_direntry; /* readdir fills a (shared) struct fat_direntry */
 int hfs_readdir(struct hfs_filestr *dirstr, struct hfs_dirscan_info *scan,
                 struct fat_direntry *entry);
 void hfs_rewinddir(struct hfs_dirscan_info *scan);
+
+/** Write functions (not built for the bootloader) **/
+void hfs_seek_to_stream(struct hfs_filestr *filestr,
+                        const struct hfs_filestr *seekto);
+int hfs_truncate(struct hfs_filestr *filestr);
+int hfs_closewrite(struct hfs_filestr *filestr, uint32_t size,
+                   struct fat_direntry *fatentp);
+int hfs_create(struct hfs_file *parent, const char *name, unsigned int attr,
+               struct hfs_file *file, struct fat_direntry *fatentp);
+int hfs_remove(struct hfs_file *file, int what);
+int hfs_rename(struct hfs_file *parent, struct hfs_file *file,
+               const unsigned char *newname);
+int hfs_modtime(struct hfs_file *parent, struct hfs_file *file, time_t modtime);
 
 /** Mounting and unmounting functions **/
 bool hfs_ismounted(IF_MV_NONVOID(int volume));
